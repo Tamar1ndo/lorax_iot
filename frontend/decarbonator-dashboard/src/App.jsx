@@ -2,6 +2,10 @@ import { useState } from "react";
 import Sidebar from "./components/sidebar";
 import Dashboard from "./pages/dashboard";
 import PlantStats from "./pages/PlantStats";
+import MapPage from "./pages/map";
+// ถ้ายังไม่มีสองหน้านี้จริง ๆ ให้คอมเมนต์ไว้ก่อนก็ได้
+// import Prediction from "./pages/Prediction";
+// import About from "./pages/About";
 import PlantDetail from "./pages/PlantDetail";
 
 function App() {
@@ -27,6 +31,8 @@ function App() {
           />
         );
       case "map":
+        return <MapPage />;
+
         return <div><h1 className="text-3xl font-bold">Map Page</h1></div>;
       case "about":
         return <div><h1 className="text-3xl font-bold">About Us</h1></div>;
