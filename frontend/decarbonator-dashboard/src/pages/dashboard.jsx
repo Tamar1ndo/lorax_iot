@@ -52,8 +52,8 @@ function Dashboard() {
 
   return (
     <div className="p-8 space-y-8">
-      {/* หัวข้อใหญ่ + การ์ดสรุป */}
-      <h1 className="text-xl font-semibold mb-4">
+    {/* หัวข้อใหญ่ + การ์ดสรุป */}
+        <h1 className="text-2xl font-bold text-gray-900 mb-1">
         Decarbonator Overview
       </h1>
 
@@ -78,11 +78,15 @@ function Dashboard() {
           <p className="text-xs text-gray-500 mb-2">?????</p>
           <p className="text-2xl font-semibold">????</p>
         </div>
+
       </div>
+
+              <hr className="border-t border-gray-300 my-4" />
+
 
       {/* เลือกช่วงวันและเวลา */}
       <section className="space-y-4">
-        <h2 className="text-sm font-semibold">
+        <h2 className="text-2xl font-bold text-gray-900 mb-1d">
           Choose Date and Time Range
         </h2>
 
@@ -165,21 +169,12 @@ function Dashboard() {
       {/* ส่วนกราฟ – แสดงเฉพาะเมื่อกด Done แล้ว */}
       {appliedRange && (
         <section className="space-y-4">
-          <h2 className="text-sm font-semibold">
-            Comparing data from this Range:
+          <h2 className="text-m font-medium mb-2">
+            <h2 className="text-m font-medium mb-2">
+              Comparing data from {formatDateTime(appliedRange.startDate, appliedRange.startTime)} until {formatDateTime(appliedRange.endDate, appliedRange.endTime)}
+            </h2>
+
           </h2>
-          <p className="text-xs text-gray-500">
-            Start:{" "}
-            {formatDateTime(
-              appliedRange.startDate,
-              appliedRange.startTime
-            )}{" "}
-            &nbsp; | &nbsp; End:{" "}
-            {formatDateTime(
-              appliedRange.endDate,
-              appliedRange.endTime
-            )}
-          </p>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {["CO2 Absorption", "Humidity", "CO2 Absorption"].map(

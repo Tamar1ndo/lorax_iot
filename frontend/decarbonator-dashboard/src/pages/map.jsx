@@ -95,9 +95,9 @@ function MapPage() {
 
   return (
     <div className="p-8 space-y-6 w-full h-full">
-      <h1 className="text-xl font-semibold mb-1">Plant Map</h1>
-      <p className="text-xs text-gray-500 mb-4">
-        คลิกบนแผนที่เพื่อเลือกตำแหน่งพืช แล้วกรอกข้อมูลเพื่อลงทะเบียน
+      <h1 className="text-2xl font-bold text-gray-900 mb-1">Plant Map</h1>
+      <p className="text-gray-500 mb-4">
+        Click the map to pick a plant location and fill in the form to register.
       </p>
 
       {/* แบ่งเป็น 2 คอลัมน์: ฟอร์ม + แผนที่ */}
@@ -108,7 +108,7 @@ function MapPage() {
           className="bg-white rounded-2xl shadow-md p-5 space-y-4 lg:col-span-1"
         >
           <h2 className="text-sm font-semibold mb-1">
-            Register a Plant
+            Register Plant Information 
           </h2>
 
           <div className="space-y-1">
@@ -174,7 +174,7 @@ function MapPage() {
             type="submit"
             className="w-full mt-2 bg-blue-600 text-white text-sm font-medium py-2 rounded-lg hover:bg-blue-700 transition-colors"
           >
-            Register Plant
+            Register A Plant
           </button>
         </form>
 

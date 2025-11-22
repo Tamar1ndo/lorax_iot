@@ -2,7 +2,7 @@ function Sidebar({ currentPage, setPage }) {
   const menuItems = [
     { id: "dashboard", label: "DASHBOARD" },
     { id: "plant-stats", label: "PLANT STATS" },
-    { id: "map", label: "Map" },
+    { id: "map", label: "MAP" },
     { id: "about", label: "ABOUT US" }
   ];
 
@@ -21,7 +21,7 @@ function Sidebar({ currentPage, setPage }) {
           <button
             key={item.id}
             onClick={() => setPage(item.id)}
-            className={`text-left px-4 py-2.5 pl-28 rounded-full text-xs tracking-wider transition-colors ${
+            className={`px-6 py-3 rounded-full text-sm tracking-wider text-left transition-colors ${
               currentPage === item.id
                 ? "bg-white text-[#1f7a4a]"
                 : "bg-transparent hover:bg-white/15"
