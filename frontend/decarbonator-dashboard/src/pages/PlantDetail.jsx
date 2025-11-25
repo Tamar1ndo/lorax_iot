@@ -13,15 +13,21 @@ function PlantDetail({ plant, onBack }) {
   const [selectedDate, setSelectedDate] = useState("all");
   const [availableDates, setAvailableDates] = useState([]);
 
+  // Updated metrics list with new Electrode data
   const metrics = [
     { value: "carbon", label: "Carbon (ppm)", color: "#22c55e" },
     { value: "temperature", label: "Air Temperature (°C)", color: "#ef4444" },
     { value: "humidity", label: "Air Humidity (%)", color: "#3b82f6" },
     { value: "lightIntensity", label: "Light Intensity", color: "#f59e0b" },
     { value: "lux", label: "Lux", color: "#fbbf24" },
+    // New Electrical Metrics
+    { value: "patchElectrode", label: "Patch Electrode (V)", color: "#8b5cf6" }, // AI_0
+    { value: "glassElectrode", label: "Glass Electrode pH (V)", color: "#ec4899" }, // AI_1
+    { value: "pureElectrode", label: "Pure Electrode (V)", color: "#06b6d4" }, // AI_2
+    // Digital Inputs
     { value: "DI_0", label: "DI_0", color: "#a855f7" },
-    { value: "DI_1", label: "DI_1", color: "#ec4899" },
-    { value: "DI_2", label: "DI_2", color: "#8b5cf6" },
+    { value: "DI_1", label: "DI_1", color: "#be185d" },
+    { value: "DI_2", label: "DI_2", color: "#4338ca" },
   ];
 
   const intervalOptions = [
@@ -33,6 +39,12 @@ function PlantDetail({ plant, onBack }) {
     { value: "1hour", label: "1 Hour", description: "Low detail" },
   ];
 
+  // Formula from image: V = (Raw - 32768) * (20 / 65535)
+  const calculateVoltage = (raw) => {
+    if (raw === undefined || raw === null) return 0;
+    return (raw - 32768) * (20 / 65535);
+  };
+
   // Fetch data from API
   useEffect(() => {
     const fetchData = async () => {
@@ -41,31 +53,41 @@ function PlantDetail({ plant, onBack }) {
         
         // Determine limit based on interval
         const limitMap = {
-          "raw": 500,
-          "1min": 500,
-          "5min": 500,
-          "15min": 500,
-          "30min": 500,
-          "1hour": 500
+          "raw": 500, "1min": 500, "5min": 500,
+          "15min": 500, "30min": 500, "1hour": 500
         };
         
         const limit = limitMap[dataInterval] || 500;
         
-        const response = await fetch(
-          `http://127.0.0.1:8000/carbon/co2/all?limit=${limit}&interval=${dataInterval}`
-        );
+        // Fetch both APIs in parallel
+        const [co2Response, elecResponse] = await Promise.all([
+          fetch(`http://127.0.0.1:8000/carbon/co2/all?limit=${limit}&interval=${dataInterval}`),
+          fetch(`http://127.0.0.1:8000/carbon/elec/all?limit=${limit}&interval=${dataInterval}`)
+        ]);
         
-        if (!response.ok) {
-          throw new Error('Failed to fetch data');
+        if (!co2Response.ok || !elecResponse.ok) {
+          throw new Error('Failed to fetch data from one or more endpoints');
         }
         
-        const data = await response.json();
+        const co2Data = await co2Response.json();
+        const elecData = await elecResponse.json();
+
+        // Create a Map for electrical data for easier merging by timestamp
+        // We use the timestamp string as the key
+        const elecMap = new Map();
+        elecData.forEach(item => {
+          const key = item.timestamp || item.TIM;
+          elecMap.set(key, item);
+        });
         
-        // Transform API data to our format
-        const transformedData = data.map(item => {
+        // Transform and Merge Data
+        const transformedData = co2Data.map(item => {
           const timestamp = item.timestamp || item.TIM;
           const dateObj = new Date(timestamp);
           
+          // Find matching electrical data
+          const elecItem = elecMap.get(timestamp) || {};
+
           return {
             timestamp: timestamp,
             date: dateObj.toLocaleDateString('en-US', { 
@@ -73,6 +95,7 @@ function PlantDetail({ plant, onBack }) {
               month: 'short', 
               day: 'numeric' 
             }),
+            // Original CO2 Data
             carbon: item["COM_1 Wd_0"] || 0,
             temperature: (item["COM_1 Wd_1"] || 0) / 100,
             humidity: (item["COM_1 Wd_2"] || 0) / 100,
@@ -81,6 +104,11 @@ function PlantDetail({ plant, onBack }) {
             DI_0: item.DI_0 || 0,
             DI_1: item.DI_1 || 0,
             DI_2: item.DI_2 || 0,
+            
+            // New Electrical Data (Converted)
+            patchElectrode: calculateVoltage(elecItem["AI_0 Val"]), // AI_0
+            glassElectrode: calculateVoltage(elecItem["AI_1 Val"]), // AI_1
+            pureElectrode: calculateVoltage(elecItem["AI_2 Val"]),  // AI_2
           };
         });
         
@@ -266,17 +294,24 @@ function PlantDetail({ plant, onBack }) {
             <div className="mt-6 pt-6 border-t">
               <p className="text-gray-700 font-semibold mb-3">(Latest sensor readings)</p>
               {latestData ? (
-                <>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                   <p className="text-gray-700"><span className="font-semibold">Carbon:</span> {latestData.carbon} ppm</p>
-                  <p className="text-gray-700"><span className="font-semibold">Air Temperature:</span> {latestData.temperature.toFixed(1)}°C</p>
-                  <p className="text-gray-700"><span className="font-semibold">Air Humidity:</span> {latestData.humidity.toFixed(1)}%</p>
-                  <p className="text-gray-700"><span className="font-semibold">Light Intensity:</span> {latestData.lightIntensity}</p>
+                  <p className="text-gray-700"><span className="font-semibold">Temp:</span> {latestData.temperature.toFixed(1)}°C</p>
+                  <p className="text-gray-700"><span className="font-semibold">Humidity:</span> {latestData.humidity.toFixed(1)}%</p>
                   <p className="text-gray-700"><span className="font-semibold">Lux:</span> {latestData.lux}</p>
-                  <p className="text-xs text-gray-500 mt-2">Last updated: {new Date(latestData.timestamp).toLocaleString()}</p>
-                </>
+                  
+                  {/* New Electrode Display */}
+                  <p className="text-gray-700 col-span-2 mt-2 font-semibold border-b pb-1">Electrode Data (V):</p>
+                  <p className="text-gray-700"><span className="font-semibold">Patch:</span> {latestData.patchElectrode.toFixed(4)} V</p>
+                  <p className="text-gray-700"><span className="font-semibold">Glass pH:</span> {latestData.glassElectrode.toFixed(4)} V</p>
+                  <p className="text-gray-700"><span className="font-semibold">Pure:</span> {latestData.pureElectrode.toFixed(4)} V</p>
+                </div>
               ) : (
                 <p className="text-gray-500">No data available</p>
               )}
+               {latestData && (
+                 <p className="text-xs text-gray-500 mt-4">Last updated: {new Date(latestData.timestamp).toLocaleString()}</p>
+               )}
             </div>
           </div>
         </div>
@@ -417,7 +452,7 @@ function PlantDetail({ plant, onBack }) {
                           </p>
                           <p className="text-sm">{payload[0].payload.fullTimestamp}</p>
                           <p className="text-sm font-semibold" style={{ color: currentMetric.color }}>
-                            {currentMetric.label}: {payload[0].value.toFixed(2)}
+                            {currentMetric.label}: {payload[0].value.toFixed(4)}
                           </p>
                         </div>
                       );
@@ -456,25 +491,25 @@ function PlantDetail({ plant, onBack }) {
               <div className="bg-gray-50 p-4 rounded-lg">
                 <p className="text-sm text-gray-600">Current</p>
                 <p className="text-2xl font-bold text-gray-900">
-                  {chartData[chartData.length - 1]?.value.toFixed(1)}
+                  {chartData[chartData.length - 1]?.value.toFixed(4)}
                 </p>
               </div>
               <div className="bg-gray-50 p-4 rounded-lg">
                 <p className="text-sm text-gray-600">Average</p>
                 <p className="text-2xl font-bold text-gray-900">
-                  {(chartData.reduce((sum, d) => sum + d.value, 0) / chartData.length).toFixed(1)}
+                  {(chartData.reduce((sum, d) => sum + d.value, 0) / chartData.length).toFixed(4)}
                 </p>
               </div>
               <div className="bg-gray-50 p-4 rounded-lg">
                 <p className="text-sm text-gray-600">Min</p>
                 <p className="text-2xl font-bold text-gray-900">
-                  {Math.min(...chartData.map(d => d.value)).toFixed(1)}
+                  {Math.min(...chartData.map(d => d.value)).toFixed(4)}
                 </p>
               </div>
               <div className="bg-gray-50 p-4 rounded-lg">
                 <p className="text-sm text-gray-600">Max</p>
                 <p className="text-2xl font-bold text-gray-900">
-                  {Math.max(...chartData.map(d => d.value)).toFixed(1)}
+                  {Math.max(...chartData.map(d => d.value)).toFixed(4)}
                 </p>
               </div>
             </div>
