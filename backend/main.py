@@ -1,100 +1,101 @@
 # app/main.py
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 
-from fastapi import FastAPI,HTTPException
-from backend.mongo.main import mongodb
+import threading
+import time
 
 from backend.api.router import api_router
 
+
+# ────────────────────────────────────────────────────────────
+# Background Sensor Sync (REALTIME CACHE)
+# ────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load data into cache on startup
-    print("🚀 Warming up cache...")
-    import threading
-    
-    def load_cache():
-        from backend.dropbox import service as dropbox_service
-        dropbox_service.get_co2_all_raw(limit=1000, interval="5min")
-        print("✅ Cache warmed up!")
-    
-    thread = threading.Thread(target=load_cache)
+    print("🚀 Starting background Dropbox sensor sync...")
+
+    from backend.dropbox import service as dropbox_service
+
+    stop_flag = {"stop": False}
+
+    def sync_loop():
+        while not stop_flag["stop"]:
+            try:
+                dropbox_service.refresh_sensor_cache(
+                    limit=1000,        # เก็บข้อมูลล่าสุด 1,000 แถว
+                    interval="5min"    # aggregate ราย 5 นาที
+                )
+            except Exception as e:
+                print(f"⚠️ Error refreshing sensor cache: {e}")
+
+            time.sleep(60)  # Sync ทุก 60 วินาที
+
+    thread = threading.Thread(target=sync_loop, daemon=True)
     thread.start()
-    
-    yield
-    # Cleanup on shutdown
-    print("👋 Shutting down...")
 
-app = FastAPI(title="Decarbonator3000")
+    yield  # แอปพร้อมให้บริการ
 
-@app.on_event("startup")
-async def startup_event():
-    await mongodb.connect_to_mongo()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await mongodb.close_mongo_connection()
-
-def convert_objectid(doc):
-    if doc and '_id' in doc:
-        doc['_id'] = str(doc['_id'])
-    return doc
+    print("👋 Shutting down background Dropbox sensor sync...")
+    stop_flag["stop"] = True
+    time.sleep(1)
 
 
+# ────────────────────────────────────────────────────────────
+# FastAPI Application
+# ────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="Decarbonator3000",
+    lifespan=lifespan,
+)
 
+
+# ────────────────────────────────────────────────────────────
+# CORS (Frontend Dev)
+# ────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "http://127.0.0.1:3000"],  # React dev server
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# ────────────────────────────────────────────────────────────
+# Routers
+# ────────────────────────────────────────────────────────────
 app.include_router(api_router)
 
 
+# ────────────────────────────────────────────────────────────
+# Health Check
+# ────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+
+# ────────────────────────────────────────────────────────────
+# DB Removed — Dummy Endpoints
+# ────────────────────────────────────────────────────────────
 @app.get("/db-info")
-async def get_database_info():
-    try:
-        database = await mongodb.get_database()
-        collections = await database.list_collection_names()
-        return {
-            "database_name": "aiot",
-            "collections": collections,
-            "collections_count": len(collections)
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error getting database info: {str(e)}"
-        )
+def no_db():
+    return {
+        "success": False,
+        "message": "MongoDB is disabled in this setup."
+    }
+
 
 @app.get("/plants/all")
-async def get_all_plants():
-    """Get all plants from database"""
-    try:
-        database = await mongodb.get_database()
-        plants_collection = database["plant"]
-        
-        plants = []
-        async for plant in plants_collection.find():
-            # Convert ObjectId to string
-            plant["id"] = str(plant.pop("_id"))
-            plants.append(plant)
-        
-        return {
-            "success": True,
-            "count": len(plants),
-            "plants": plants
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error getting plants: {str(e)}"
-        )
-
-
+def no_plants():
+    return {
+        "success": False,
+        "message": "Plant database is not enabled in this setup."
+    }

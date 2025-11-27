@@ -1,22 +1,42 @@
 # backend/dropbox/service.py
-
 import io
 from typing import List, Dict, Optional, Literal
-from datetime import timedelta
+from datetime import datetime
 
 import dropbox
 import pandas as pd
-import numpy as np  
+import numpy as np
 
 from backend.dropbox.env import DROPBOX_TOKEN, WISE4051_ROOT, WISE4012_ROOT
 
+# ─────────────────────────────────────────────────────────────
+# Sensor Columns
+# ─────────────────────────────────────────────────────────────
 CO2_COL = "COM_1 Wd_0"
 TEMP_COL = "COM_1 Wd_1"
 HUMID_COL = "COM_1 Wd_2"
 
-# Cache to avoid re-reading from Dropbox every time
-_cache = {}
+# raw bioelectric columns from WISE-4012
+LEAF_COL = "AI_0 Val"
+GROUND_COL = "AI_1 Val"
 
+# ─────────────────────────────────────────────────────────────
+# CACHE
+# ─────────────────────────────────────────────────────────────
+
+# RAW cache (per root folder)
+_cache: Dict[str, pd.DataFrame] = {}
+
+# REALTIME sensor cache for AI / Backend
+_sensor_cache = {
+    "wise4051": {"data": None, "last_updated": None},  # CO2 / Temp / Humid
+    "wise4012": {"data": None, "last_updated": None},  # Leaf / Ground (+ voltage)
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# Dropbox Utils
+# ─────────────────────────────────────────────────────────────
 def get_client() -> dropbox.Dropbox:
     return dropbox.Dropbox(DROPBOX_TOKEN)
 
@@ -29,8 +49,8 @@ def list_date_folders(root_path: str) -> List[str]:
     while True:
         for entry in res.entries:
             if isinstance(entry, dropbox.files.FolderMetadata):
-                path = entry.path_lower or entry.path_display
-                folders.append(path)
+                # ใช้ path_display ให้ตรงกับ root_path ที่กำหนด
+                folders.append(entry.path_display)
         if not res.has_more:
             break
         res = dbx.files_list_folder_continue(res.cursor)
@@ -47,8 +67,7 @@ def list_csv_files(dbx: dropbox.Dropbox, folder_path: str) -> List[str]:
             if isinstance(entry, dropbox.files.FileMetadata) and entry.name.lower().endswith(
                 ".csv"
             ):
-                path = entry.path_lower or entry.path_display
-                files.append(path)
+                files.append(entry.path_display)
         if not res.has_more:
             break
         res = dbx.files_list_folder_continue(res.cursor)
@@ -63,46 +82,45 @@ def download_csv_to_df(dbx: dropbox.Dropbox, file_path: str) -> pd.DataFrame:
     return df
 
 
+# ─────────────────────────────────────────────────────────────
+# Timestamp Builder
+# ─────────────────────────────────────────────────────────────
 def add_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
     if "timestamp" in df.columns:
         return df
 
-    # เคส WISE-4051: มีคอลัมน์ TIM เป็น ISO time เช่น 2025-11-18T14:44:23+07:00
+    # เคส WISE-4051: TIM เป็น ISO time เช่น 2025-11-18T14:44:23+07:00
     if "TIM" in df.columns:
         df["timestamp"] = pd.to_datetime(df["TIM"], errors="coerce")
-        if df["timestamp"].isna().all():
-            raise ValueError("TIM column exists but cannot parse timestamps")
         return df
 
-    year_cols = ["Year", "YEAR", "year"]
-    month_cols = ["Month", "MONTH", "month"]
-    day_cols = ["Day", "DAY", "day"]
-    hour_cols = ["Hour", "HOUR", "hour"]
-    minute_cols = ["Minute", "MINUTE", "minute"]
-    second_cols = ["Second", "SECOND", "second"]
+    cols = {
+        "year": ["Year", "YEAR", "year"],
+        "month": ["Month", "MONTH", "month"],
+        "day": ["Day", "DAY", "day"],
+        "hour": ["Hour", "HOUR", "hour"],
+        "minute": ["Minute", "MINUTE", "minute"],
+        "second": ["Second", "SECOND", "second"],
+    }
 
-    def pick(cols):
-        for c in cols:
+    def pick(name):
+        for c in cols[name]:
             if c in df.columns:
                 return c
         return None
 
-    y_col = pick(year_cols)
-    m_col = pick(month_cols)
-    d_col = pick(day_cols)
-    h_col = pick(hour_cols)
-    mn_col = pick(minute_cols)
-    s_col = pick(second_cols)
+    y, m, d = pick("year"), pick("month"), pick("day")
+    h, mn, s = pick("hour"), pick("minute"), pick("second")
 
-    if y_col and m_col and d_col and h_col and mn_col and s_col:
+    if all([y, m, d, h, mn, s]):
         df["timestamp"] = pd.to_datetime(
             dict(
-                year=df[y_col],
-                month=df[m_col],
-                day=df[d_col],
-                hour=df[h_col],
-                minute=df[mn_col],
-                second=df[s_col],
+                year=df[y],
+                month=df[m],
+                day=df[d],
+                hour=df[h],
+                minute=df[mn],
+                second=df[s],
             ),
             errors="coerce",
         )
@@ -112,39 +130,42 @@ def add_timestamp_column(df: pd.DataFrame) -> pd.DataFrame:
         df["timestamp"] = pd.to_datetime(df["Time"], errors="coerce")
         return df
 
-    raise ValueError("Cannot build timestamp column from CSV (no usable time columns)")
+    raise ValueError("Cannot detect timestamp columns in CSV.")
 
-# backend/dropbox/service.py
 
-# Change this function:
-def read_all_csv_under(root_path: str, use_cache: bool = True, skip_old_data: bool = True) -> pd.DataFrame:
-    # USE CACHE - only download once!
+# ─────────────────────────────────────────────────────────────
+# Read All CSV for a Device
+# ─────────────────────────────────────────────────────────────
+def read_all_csv_under(
+    root_path: str,
+    use_cache: bool = True,
+    skip_old_data: bool = True,
+) -> pd.DataFrame:
+    # ใช้ cache ระดับ root ถ้ามี
     if use_cache and root_path in _cache:
         print(f"✅ Using cached data for {root_path}")
         return _cache[root_path]
-    
+
     print(f"📥 Reading fresh data from Dropbox: {root_path}")
+
     dbx = get_client()
     all_rows: List[pd.DataFrame] = []
 
     folders = list_date_folders(root_path)
-    
-    # OPTIMIZATION: Only read recent folders if skip_old_data=True
+
+    # อ่านเฉพาะโฟลเดอร์ล่าสุดเพื่อลดเวลา
     if skip_old_data and len(folders) > 7:
-        # Only read last 7 days of data
         folders = sorted(folders)[-7:]
-        print(f"⚡ Reading last {len(folders)} folders")
-    
+
     for folder in folders:
         csv_files = list_csv_files(dbx, folder)
-        for path in csv_files:
+        for file_path in csv_files:
             try:
-                df = download_csv_to_df(dbx, path)
+                df = download_csv_to_df(dbx, file_path)
                 df = add_timestamp_column(df)
                 all_rows.append(df)
             except Exception as e:
-                print(f"⚠️ Failed to read {path}: {e}")
-                continue
+                print(f"⚠️ Failed to read {file_path}: {e}")
 
     if not all_rows:
         return pd.DataFrame()
@@ -152,192 +173,182 @@ def read_all_csv_under(root_path: str, use_cache: bool = True, skip_old_data: bo
     print(f"🔄 Concatenating {len(all_rows)} dataframes...")
     df_all = pd.concat(all_rows, ignore_index=True)
     df_all = df_all.sort_values("timestamp").reset_index(drop=True)
-    
-    # Cache the result
+
     if use_cache:
         _cache[root_path] = df_all
         print(f"💾 Cached {len(df_all)} rows")
-    
+
     return df_all
 
-# ---------- helper: clean NaN ก่อนส่งออก JSON ----------
 
+# ─────────────────────────────────────────────────────────────
+# Export Cleaner
+# ─────────────────────────────────────────────────────────────
 def df_to_records(df: pd.DataFrame) -> List[Dict]:
-    """
-    แปลง DataFrame -> list[dict] โดยแปลง NaN เป็น None
-    เพื่อให้ JSON encoder ของ FastAPI handle ได้
-    """
     if df.empty:
         return []
-    df_clean = df.replace({np.nan: None})
-    return df_clean.to_dict(orient="records")
+    df = df.replace({np.nan: None})
+    return df.to_dict(orient="records")
 
 
-# ---------- NEW: Aggregation function ----------
-
+# ─────────────────────────────────────────────────────────────
+# Aggregation
+# ─────────────────────────────────────────────────────────────
 def aggregate_data(
-    df: pd.DataFrame, 
-    interval: Literal["1min", "5min", "15min", "30min", "1hour"]
+    df: pd.DataFrame,
+    interval: Literal["1min", "5min", "15min", "30min", "1hour"],
 ) -> pd.DataFrame:
-    """Aggregate sensor data by time interval"""
     if df.empty:
         return df
-    
-    # Map interval to pandas frequency string
+
     freq_map = {
-        "1min": "1min",
-        "5min": "5min",
-        "15min": "15min",
-        "30min": "30min",
-        "1hour": "1h"
+        "1min": "1T",
+        "5min": "5T",
+        "15min": "15T",
+        "30min": "30T",
+        "1hour": "1H",
     }
-    
-    freq = freq_map.get(interval, "5min")
-    
-    # Separate numeric and non-numeric columns
+    freq = freq_map.get(interval, "5T")
+
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    # Keep timestamp and numeric columns only for aggregation
-    df_numeric = df[['timestamp'] + numeric_cols].copy()
-    
-    # Group by time interval and calculate mean (only numeric columns)
+    df_numeric = df[["timestamp"] + numeric_cols].copy()
+
     df_agg = df_numeric.set_index("timestamp").resample(freq).mean().reset_index()
-    
-    # Add back non-numeric columns (take first value in each group)
-    non_numeric_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
-    if non_numeric_cols:
-        # Remove 'timestamp' if it's in the list
-        non_numeric_cols = [col for col in non_numeric_cols if col != 'timestamp']
-        
-        if non_numeric_cols:
-            df_non_numeric = df[['timestamp'] + non_numeric_cols].copy()
-            df_non_numeric_agg = (
-                df_non_numeric.set_index("timestamp")
-                .resample(freq)
-                .first()
-                .reset_index()
-            )
-            # Merge numeric and non-numeric
-            df_agg = df_agg.merge(df_non_numeric_agg, on='timestamp', how='left')
-    
-    # Round numeric columns to reasonable precision
-    numeric_cols_in_result = df_agg.select_dtypes(include=[np.number]).columns
-    df_agg[numeric_cols_in_result] = df_agg[numeric_cols_in_result].round(2)
-    
     return df_agg
 
-def group_hourly(df: pd.DataFrame, value_col: str) -> List[Dict]:
-    if df.empty or value_col not in df.columns:
-        return []
 
-    grouped = (
-        df.groupby(df["timestamp"].dt.floor("h"))[value_col]
-        .mean()
-        .reset_index()
-        .rename(columns={"timestamp": "time", value_col: "value"})
-    )
-    grouped["time"] = grouped["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    return df_to_records(grouped)
+# ─────────────────────────────────────────────────────────────
+# Bioelectric Voltage Conversion
+# ─────────────────────────────────────────────────────────────
+def convert_bioelectric_voltage(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    แปลงค่า raw ADC ของ LEAF_COL / GROUND_COL เป็นโวลต์
+    ใช้สูตร: V = (Raw - 32768) * 20 / 65535
+    """
+    if df is None or df.empty:
+        return df
 
+    def adc_to_voltage(raw):
+        try:
+            return (float(raw) - 32768.0) * (20.0 / 65535.0)
+        except Exception:
+            return None
 
-def group_daily(df: pd.DataFrame, value_col: str) -> List[Dict]:
-    if df.empty or value_col not in df.columns:
-        return []
+    if LEAF_COL in df.columns:
+        df["Leaf_Voltage"] = df[LEAF_COL].apply(adc_to_voltage)
 
-    df["date"] = df["timestamp"].dt.date
-    grouped = (
-        df.groupby("date")[value_col]
-        .mean()
-        .reset_index()
-        .rename(columns={value_col: "value"})
-    )
-    grouped["date"] = grouped["date"].astype(str)
-    return df_to_records(grouped)
+    if GROUND_COL in df.columns:
+        df["Ground_Voltage"] = df[GROUND_COL].apply(adc_to_voltage)
+
+    return df
 
 
-# ---------- CO2 (WISE-4051) ----------
-
+# ─────────────────────────────────────────────────────────────
+# High-level RAW accessors
+# ─────────────────────────────────────────────────────────────
 def get_co2_all_raw(
     limit: Optional[int] = None,
-    interval: Optional[Literal["raw", "1min", "5min", "15min", "30min", "1hour"]] = "raw"
+    interval: Optional[Literal["raw", "1min", "5min", "15min", "30min", "1hour"]] = "raw",
 ) -> List[Dict]:
     df = read_all_csv_under(WISE4051_ROOT)
-    
-    # Apply aggregation if requested
+
     if interval != "raw":
         df = aggregate_data(df, interval)
-    
-    # Apply limit (get last N records)
-    if limit is not None and limit > 0:
-        df = df.tail(limit) 
-    return df_to_records(df)
 
+    if limit:
+        df = df.tail(limit)
+
+    return df_to_records(df)
 
 
 def get_elec_all_raw(
     limit: Optional[int] = None,
-    interval: Optional[Literal["raw", "1min", "5min", "15min", "30min", "1hour"]] = "raw"
+    interval: Optional[Literal["raw", "1min", "5min", "15min", "30min", "1hour"]] = "raw",
 ) -> List[Dict]:
     df = read_all_csv_under(WISE4012_ROOT)
-    
-    # Apply aggregation if requested
+
+    # แปลง bioelectric เป็นโวลต์ก่อน
+    df = convert_bioelectric_voltage(df)
+
     if interval != "raw":
         df = aggregate_data(df, interval)
-    
-    # Apply limit (get last N records)
-    if limit is not None and limit > 0:
-        df = df.tail(limit) 
+
+    if limit:
+        df = df.tail(limit)
+
     return df_to_records(df)
 
 
+# ─────────────────────────────────────────────────────────────
+# REALTIME SENSOR CACHE (for AI + Backend)
+# ─────────────────────────────────────────────────────────────
+def refresh_sensor_cache(
+    limit: Optional[int] = 1000,
+    interval: Optional[Literal["raw", "1min", "5min", "15min", "30min", "1hour"]] = "5min",
+) -> None:
+    """
+    ดึงข้อมูลจาก Dropbox + aggregate + ใส่ลง sensor cache:
+      - wise4051: CO2 / Temp / Humid
+      - wise4012: Leaf / Ground (+ Leaf_Voltage / Ground_Voltage)
+    """
+    global _sensor_cache
 
-def get_co2_all_hourly() -> List[Dict]:
-    df = read_all_csv_under(WISE4051_ROOT)
-    return group_hourly(df, CO2_COL)
+    print("🔁 Refreshing ALL sensors...")
+
+    # ---------- 4051 ----------
+    df4051 = read_all_csv_under(WISE4051_ROOT, use_cache=False)
+
+    if not df4051.empty and interval != "raw":
+        df4051 = aggregate_data(df4051, interval)
+
+    if not df4051.empty and limit:
+        df4051 = df4051.tail(limit)
+
+    if df4051.empty:
+        print("⚠️ No WISE-4051 data found.")
+        _sensor_cache["wise4051"] = {"data": None, "last_updated": None}
+    else:
+        _sensor_cache["wise4051"] = {
+            "data": df4051.copy(),
+            "last_updated": datetime.now(),
+        }
+        print(f"✅ 4051 cached: {len(df4051)} rows")
+
+    # ---------- 4012 ----------
+    df4012 = read_all_csv_under(WISE4012_ROOT, use_cache=False)
+
+    # แปลง bioelectric เป็นโวลต์
+    df4012 = convert_bioelectric_voltage(df4012)
+
+    if not df4012.empty and interval != "raw":
+        df4012 = aggregate_data(df4012, interval)
+
+    if not df4012.empty and limit:
+        df4012 = df4012.tail(limit)
+
+    if df4012.empty:
+        print("⚠️ No WISE-4012 data found.")
+        _sensor_cache["wise4012"] = {"data": None, "last_updated": None}
+    else:
+        _sensor_cache["wise4012"] = {
+            "data": df4012.copy(),
+            "last_updated": datetime.now(),
+        }
+        print(f"✅ 4012 cached: {len(df4012)} rows")
 
 
-def get_co2_daily() -> List[Dict]:
-    df = read_all_csv_under(WISE4051_ROOT)
-    return group_daily(df, CO2_COL)
+def get_sensor_cache():
+    return _sensor_cache
 
 
-# ---------- Temperature (WISE-4012) ----------
-
-def get_temp_all_raw() -> List[Dict]:
-    df = read_all_csv_under(WISE4012_ROOT)
-    return df_to_records(df)
-
-
-def get_temp_all_hourly() -> List[Dict]:
-    df = read_all_csv_under(WISE4012_ROOT)
-    return group_hourly(df, TEMP_COL)
-
-
-def get_temp_daily() -> List[Dict]:
-    df = read_all_csv_under(WISE4012_ROOT)
-    return group_daily(df, TEMP_COL)
-
-
-# ---------- Humidity (WISE-4012) ----------
-
-def get_humid_all_raw() -> List[Dict]:
-    df = read_all_csv_under(WISE4012_ROOT)
-    return df_to_records(df)
-
-
-def get_humid_all_hourly() -> List[Dict]:
-    df = read_all_csv_under(WISE4012_ROOT)
-    return group_hourly(df, HUMID_COL)
-
-
-def get_humid_daily() -> List[Dict]:
-    df = read_all_csv_under(WISE4012_ROOT)
-    return group_daily(df, HUMID_COL)
-
-
-# ---------- Cache management ----------
-
+# ─────────────────────────────────────────────────────────────
+# CLEAR CACHE
+# ─────────────────────────────────────────────────────────────
 def clear_cache():
-    """Clear the data cache - call this when new data is added"""
-    global _cache
+    global _cache, _sensor_cache
     _cache = {}
+    _sensor_cache = {
+        "wise4051": {"data": None, "last_updated": None},
+        "wise4012": {"data": None, "last_updated": None},
+    }
+    print("🧹 All cache cleared.")
